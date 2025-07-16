@@ -37,19 +37,22 @@ namespace AzureIPChecker
     // Class to handle IP range checking
     public class IPRangeChecker
     {
-        private readonly List<(IPAddress Network, int PrefixLength)> _ipRanges = new();
+        private readonly List<(IPAddress Network, int PrefixLength, ServiceTag ServiceTag)> _ipRanges = new();
 
-        public IPRangeChecker(List<string> cidrRanges)
+        public IPRangeChecker(List<ServiceTag> serviceTags)
         {
-            foreach (var cidr in cidrRanges)
+            foreach (var serviceTag in serviceTags)
             {
-                if (TryParseCIDR(cidr, out var network, out var prefixLength))
+                foreach (var cidr in serviceTag.Properties.AddressPrefixes)
                 {
-                    _ipRanges.Add((network, prefixLength));
-                }
-                else
-                {
-                    Console.WriteLine($"Warning: Failed to parse CIDR: {cidr}");
+                    if (TryParseCIDR(cidr, out var network, out var prefixLength))
+                    {
+                        _ipRanges.Add((network, prefixLength, serviceTag));
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Warning: Failed to parse CIDR: {cidr}");
+                    }
                 }
             }
         }
@@ -89,11 +92,14 @@ namespace AzureIPChecker
             }
         }
 
-        public bool IsIPInRange(string ipAddress)
+        public (bool IsInRange, List<(string Region, string SystemService)> Matches) IsIPInRange(string ipAddress)
         {
-            if (!IPAddress.TryParse(ipAddress, out var ip)) return false;
+            if (!IPAddress.TryParse(ipAddress, out var ip)) return (false, new List<(string, string)>());
 
-            foreach (var (network, prefixLength) in _ipRanges)
+            var matches = new List<(string Region, string SystemService)>();
+            bool isInRange = false;
+
+            foreach (var (network, prefixLength, serviceTag) in _ipRanges)
             {
                 if (network.AddressFamily != ip.AddressFamily) continue;
 
@@ -111,10 +117,14 @@ namespace AzureIPChecker
                     }
                 }
 
-                if (isMatch) return true;
+                if (isMatch)
+                {
+                    isInRange = true;
+                    matches.Add((serviceTag.Properties.Region, serviceTag.Properties.SystemService));
+                }
             }
 
-            return false;
+            return (isInRange, matches);
         }
 
         private byte[] GetMaskBytes(int prefixLength, System.Net.Sockets.AddressFamily addressFamily)
@@ -195,19 +205,16 @@ namespace AzureIPChecker
                     return;
                 }
 
-                // Collect all address prefixes from all service tags
-                var allPrefixes = azureData.Values
-                    .SelectMany(v => v.Properties.AddressPrefixes)
-                    .ToList();
-
-                if (!allPrefixes.Any())
+                // Collect all service tags
+                var serviceTags = azureData.Values;
+                if (!serviceTags.Any())
                 {
-                    Console.WriteLine("Error: No address prefixes found in the JSON data.");
+                    Console.WriteLine("Error: No service tags found in the JSON data.");
                     return;
                 }
 
                 // Create IP range checker
-                var checker = new IPRangeChecker(allPrefixes);
+                var checker = new IPRangeChecker(serviceTags);
 
                 // Main loop for user input
                 while (true)
@@ -225,8 +232,20 @@ namespace AzureIPChecker
                     }
 
                     // Check if the IP is in any of the ranges
-                    bool isInRange = checker.IsIPInRange(input);
-                    Console.WriteLine($"The IP address {input} {(isInRange ? "is" : "is not")} in the Azure IP ranges.");
+                    var (isInRange, matches) = checker.IsIPInRange(input);
+                    if (isInRange)
+                    {
+                        Console.WriteLine($"The IP address {input} is in the Azure IP ranges.");
+                        Console.WriteLine("Matching service tags:");
+                        foreach (var (region, systemService) in matches)
+                        {
+                            Console.WriteLine($"  - SystemService: {systemService}, Region: {(string.IsNullOrEmpty(region) ? "Global" : region)}");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"The IP address {input} is not in the Azure IP ranges.");
+                    }
                 }
             }
             catch (FileNotFoundException)
